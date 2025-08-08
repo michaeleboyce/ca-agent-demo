@@ -2,4 +2,24 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Import Public Sans (USWDS primary font) */
+@import url('https://fonts.googleapis.com/css2?family=Public+Sans:wght@300;400;500;600;700&display=swap');
+
 :root { color-scheme: light dark; }
+
+@layer base {
+  html { font-family: "Public Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"; }
+  body { @apply bg-neutral-50 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100; }
+  a { @apply text-civic-blue-600 hover:text-civic-blue-500 underline-offset-2 hover:underline; }
+}
+
+@layer components {
+  .usa-card {@apply bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl shadow-subtle;}
+  .usa-button-primary {@apply inline-flex items-center justify-center rounded-xl bg-civic-blue-600 text-white px-4 py-2 text-sm font-semibold hover:bg-civic-blue-500 focus:outline-none focus:ring-2 focus:ring-civic-blue-400 disabled:opacity-50 dark:bg-civic-blue-500 dark:hover:bg-civic-blue-400;}
+  .usa-button-secondary {@apply inline-flex items-center justify-center rounded-xl bg-white text-civic-blue-600 ring-1 ring-inset ring-civic-blue-600 px-4 py-2 text-sm font-semibold hover:bg-civic-blue-50 focus:outline-none focus:ring-2 focus:ring-civic-blue-400 dark:bg-neutral-900;}
+  .usa-input {@apply rounded-xl border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 px-3 py-2 text-sm shadow-sm focus:ring-civic-blue-400 focus:border-civic-blue-500 outline-none;}
+  .usa-badge {@apply inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300;}
+}
+
+/* Prevent browser scroll anchoring from fighting manual scroll compensation */
+.no-scroll-anchor { overflow-anchor: none; }

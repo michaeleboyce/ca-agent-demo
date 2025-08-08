@@ -2,51 +2,51 @@
 
 A full-stack Next.js app that:
 
-1. **Scrapes** the provided seed links and their subcontent (same-origin, limited depth)
-2. **Parses** HTML + PDF (ArcGIS app captured via Playwright), chunks & tokenizes
-3. **Embeds** all chunks with `text-embedding-3-large`
-4. **Indexes** locally (`data/index.json`)
-5. **Chats** over the documents using **tool calls** with a visible **Tool Trace** panel
-6. **Produces expandable inline citations** with quoted source snippets
-7. **Refuses irrelevant questions** outside the provided topics
+1. **Scrapes** seed links and limited same‑origin subpages (depth/page limits)
+2. **Parses** HTML and PDF (ArcGIS app text via Playwright)
+3. **Chunks** and token‑counts text
+4. **Indexes** locally to `data/index.json`
+5. **Chats** over the documents using OpenAI tool calls with a visible **Tool Trace**
+6. **Adds citations** with quoted source snippets
+7. **Stays in scope** for five predefined California resources
 
-## Setup
+### Quick Start
 
 ```bash
 pnpm i
-# or npm i / yarn
 
-# env
-cp .env.example .env.local
-# then set OPENAI_API_KEY
+# One‑time (Playwright browsers)
+npx playwright install chromium --with-deps
 
-# crawl + index
+# Environment
+touch .env.local
+echo "OPENAI_API_KEY=sk-..." >> .env.local
+
+# Crawl + build index
 pnpm crawl
 pnpm index
 
-# run
+# Run
 pnpm dev
 ```
 
-## Environment
+### What it can answer
 
-Create `.env.local` with:
+- Emergency alerts signup (Listos California)
+- California unemployment (EDD)
+- South Coast air quality map (ArcGIS)
+- LA County Hazardous Tree Removal waiver (PDF)
+- USCIS N-565 (replacement naturalization/citizenship docs)
 
-```
-OPENAI_API_KEY=sk-...
-```
+### Notes
 
-## Notes
-- Crawler intentionally limits depth/pages to avoid runaway crawling. Adjust `MAX_DEPTH` and `MAX_PAGES_PER_DOMAIN` in `scripts/crawl.ts` as needed.
-- ArcGIS apps can be heavy; Playwright waits briefly to let content render, then extracts text from the DOM.
-- PDF is parsed with `pdf-parse`.
-- The chat route defines two tools for the model: `searchIndex` (seeded with top candidates) and `fetchChunks` (the model asks for specific chunk IDs). The UI shows each step.
-- The system prompt hard-limits scope to the five specified topics, so it **won't answer** outside them.
-- Citations are expandable `<details>` blocks appended after the answer.
-- This demo uses a simple hybrid (keyword+vector) search over a small local index; for bigger corpora, consider a vector DB.
+- Crawler uses modest depth/page limits (see `scripts/crawl.ts`).
+- The UI shows search/read tool steps and inline citations.
 
-## Security & Respect for Sites
-- This is a demonstration scraper. Be courteous: keep concurrency low, respect robots.txt if you expand it, and set reasonable rate limits.
+### Security & Respect for Sites
 
-## License
+- Demonstration scraper—be courteous. Keep concurrency modest, consider honoring robots.txt if you expand scope, and set reasonable rate limits.
+
+### License
+
 MIT

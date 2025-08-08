@@ -38,9 +38,10 @@ export async function POST(req: NextRequest) {
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         sendEvent({ type: 'message_complete', content });
+
         sendEvent({ type: 'done', citations: result.citations, toolCalls: result.toolCalls });
       } catch (error) {
-        console.error('Stream error:', error);
+        console.error('Test stream error:', error);
         sendEvent({ type: 'error', message: 'An error occurred' });
       } finally {
         controller.close();
@@ -56,3 +57,5 @@ export async function POST(req: NextRequest) {
     },
   });
 }
+
+

@@ -78,7 +78,7 @@ HOW TO USE YOUR TOOLS:
   try {
     for (let i = 0; i < 10; i++) {
       const response = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-5',
         messages: conversationMessages,
         tools,
         tool_choice: 'auto'

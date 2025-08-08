@@ -1,6 +1,9 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, Fragment } from 'react';
 import { testScenarios, TestScenario, TestCategory } from '@/lib/test-scenarios';
+import Chat from '@/components/Chat';
+import { buildSystemPrompt } from '@/lib/prompts';
+import { TestRunRow } from '@/components/TestRunRow';
 
 type TestResult = {
   scenarioId: string;
@@ -11,6 +14,7 @@ type TestResult = {
   feedback?: string;
   executionTime?: number;
   error?: string;
+  judging?: boolean;
 };
 
 const categoryColors: Record<TestCategory, string> = {
@@ -41,96 +45,237 @@ export default function TestPage() {
   const [editingScenario, setEditingScenario] = useState<TestScenario | null>(null);
   const [runningAll, setRunningAll] = useState(false);
   const [filterCategory, setFilterCategory] = useState<TestCategory | 'all'>('all');
+  const [scenarios, setScenarios] = useState<TestScenario[]>(testScenarios);
+  const SCENARIOS_KEY = 'ca-agent-demo:tests:scenarios';
+  const TESTS_PREFIX = 'ca-agent-demo:tests:';
+  const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+  const [runKeys, setRunKeys] = useState<Record<string, number>>({});
+  const [configOpen, setConfigOpen] = useState(false);
+  const [systemPrompt, setSystemPrompt] = useState<string>(buildSystemPrompt());
+  const [toolSearchDesc, setToolSearchDesc] = useState<string>('Search for information using keywords.');
+  const [toolReadDesc, setToolReadDesc] = useState<string>('Read content from documents with pagination.');
+  const runStartTimesRef = useRef<Record<string, number>>({});
+  const judgingStartTimesRef = useRef<Record<string, number>>({});
+  const runResolversRef = useRef<Record<string, (value: void | PromiseLike<void>) => void>>({});
+  const [editForm, setEditForm] = useState<{
+    id: string;
+    name: string;
+    category: TestCategory;
+    input: string;
+    expectedBehavior: string;
+    successCriteria: string;
+    failureCriteria: string;
+    isMultiTurn: boolean;
+    previousMessagesText: string;
+  } | null>(null);
 
+  // Load custom scenarios from localStorage
   useEffect(() => {
-    // Initialize results
-    const initialResults: Record<string, TestResult> = {};
-    testScenarios.forEach(scenario => {
-      initialResults[scenario.id] = { scenarioId: scenario.id, status: 'pending' };
-    });
-    setResults(initialResults);
+    try {
+      const stored = typeof window !== 'undefined' ? localStorage.getItem(SCENARIOS_KEY) : null;
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          setScenarios(parsed as TestScenario[]);
+        }
+      }
+    } catch (_) {
+      // ignore
+    }
   }, []);
 
-  async function runTest(scenario: TestScenario) {
-    setResults(prev => ({
-      ...prev,
-      [scenario.id]: { ...prev[scenario.id], status: 'running' }
-    }));
-
-    try {
-      const startTime = Date.now();
-      
-      // Run the test through the chat API
-      const messages = scenario.previousMessages || [];
-      messages.push({ role: 'user' as const, content: scenario.input });
-      
-      const chatResponse = await fetch('/api/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages })
+  // Initialize results on first load and keep results keys in sync with scenarios
+  useEffect(() => {
+    setResults(prev => {
+      // Initialize if empty
+      const next: Record<string, TestResult> = { ...prev };
+      scenarios.forEach(s => {
+        if (!next[s.id]) next[s.id] = { scenarioId: s.id, status: 'pending' };
       });
+      Object.keys(next).forEach(id => {
+        if (!scenarios.find(s => s.id === id)) delete next[id];
+      });
+      return next;
+    });
+  }, [scenarios]);
 
-      if (!chatResponse.ok) throw new Error('Chat API failed');
-      
-      const chatData = await chatResponse.json();
-      const executionTime = Date.now() - startTime;
+  // Persist scenarios to localStorage
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(SCENARIOS_KEY, JSON.stringify(scenarios));
+      }
+    } catch (_) {
+      // ignore
+    }
+  }, [scenarios]);
 
-      // Judge the response
+  // Populate edit form when opening editor
+  useEffect(() => {
+    if (!editingScenario) {
+      setEditForm(null);
+      return;
+    }
+    setEditForm({
+      id: editingScenario.id,
+      name: editingScenario.name,
+      category: editingScenario.category,
+      input: editingScenario.input,
+      expectedBehavior: editingScenario.expectedBehavior,
+      successCriteria: (editingScenario.successCriteria || []).join('\n'),
+      failureCriteria: (editingScenario.failureCriteria || []).join('\n'),
+      isMultiTurn: !!editingScenario.isMultiTurn,
+      previousMessagesText: JSON.stringify(editingScenario.previousMessages || [], null, 2)
+    });
+  }, [editingScenario]);
+
+  function handleSaveEdit() {
+    if (!editForm) return;
+    let parsedPrevious: { role: 'user' | 'assistant'; content: string }[] = [];
+    try {
+      parsedPrevious = JSON.parse(editForm.previousMessagesText || '[]');
+      if (!Array.isArray(parsedPrevious)) throw new Error('prev not array');
+      parsedPrevious = parsedPrevious.filter(
+        (m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string'
+      );
+    } catch (_) {
+      parsedPrevious = [];
+    }
+    const updated: TestScenario = {
+      id: editForm.id.trim() || `custom_${Date.now()}`,
+      name: editForm.name.trim() || 'Untitled',
+      category: editForm.category,
+      input: editForm.input,
+      expectedBehavior: editForm.expectedBehavior,
+      successCriteria: editForm.successCriteria
+        .split('\n')
+        .map(s => s.trim())
+        .filter(Boolean),
+      failureCriteria: editForm.failureCriteria
+        .split('\n')
+        .map(s => s.trim())
+        .filter(Boolean),
+      isMultiTurn: !!editForm.isMultiTurn,
+      previousMessages: parsedPrevious
+    };
+    setScenarios(prev => {
+      const existingIdx = prev.findIndex(s => s.id === updated.id);
+      if (existingIdx >= 0) {
+        const next = [...prev];
+        next[existingIdx] = updated;
+        return next;
+      }
+      return [...prev, updated];
+    });
+    setEditingScenario(null);
+  }
+
+  function handleDeleteScenario(id: string) {
+    setScenarios(prev => prev.filter(s => s.id !== id));
+    setEditingScenario(null);
+  }
+
+  function handleCancelEdit() {
+    setEditingScenario(null);
+  }
+
+  function toggleRow(id: string) {
+    setExpandedRows(prev => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  function runStreamingTest(scenario: TestScenario): Promise<void> {
+    setExpandedRows(prev => ({ ...prev, [scenario.id]: true }));
+    setResults(prev => ({ ...prev, [scenario.id]: { ...prev[scenario.id], status: 'running', judging: false } }));
+    runStartTimesRef.current[scenario.id] = Date.now();
+    const promise = new Promise<void>((resolve) => {
+      runResolversRef.current[scenario.id] = resolve;
+    });
+    setRunKeys(prev => ({ ...prev, [scenario.id]: (prev[scenario.id] || 0) + 1 }));
+    return promise;
+  }
+
+  async function handleStreamDone(scenario: TestScenario, payload: { content: string; toolCalls?: any[]; citations?: any[] }) {
+    try {
+      // mark as judging
+      setResults(prev => ({ ...prev, [scenario.id]: { ...prev[scenario.id], judging: true } }));
+      judgingStartTimesRef.current[scenario.id] = Date.now();
+      const executionTime = Math.max(0, Date.now() - (runStartTimesRef.current[scenario.id] || Date.now()));
       const judgeResponse = await fetch('/api/judge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           scenario,
-          response: chatData.message,
-          toolCalls: chatData.toolCalls,
-          citations: chatData.citations
-        })
+          response: payload.content,
+          toolCalls: payload.toolCalls,
+          citations: payload.citations,
+        }),
       });
-
       if (!judgeResponse.ok) throw new Error('Judge API failed');
-      
       const judgeData = await judgeResponse.json();
-
-      setResults(prev => ({
+      const elapsed = Date.now() - (judgingStartTimesRef.current[scenario.id] || Date.now());
+      const MIN_JUDGING_MS = 600;
+      const applyResult = () => setResults(prev => ({
         ...prev,
         [scenario.id]: {
           scenarioId: scenario.id,
           status: judgeData.passed ? 'passed' : 'failed',
-          response: chatData.message,
-          toolCalls: chatData.toolCalls,
+          response: payload.content,
+          toolCalls: payload.toolCalls,
           score: judgeData.score,
           feedback: judgeData.feedback,
-          executionTime
-        }
+          executionTime,
+          judging: false,
+        },
       }));
+      if (elapsed < MIN_JUDGING_MS) setTimeout(applyResult, MIN_JUDGING_MS - elapsed);
+      else applyResult();
     } catch (error) {
-      setResults(prev => ({
+      const elapsed = Date.now() - (judgingStartTimesRef.current[scenario.id] || Date.now());
+      const MIN_JUDGING_MS = 600;
+      const applyError = () => setResults(prev => ({
         ...prev,
         [scenario.id]: {
           scenarioId: scenario.id,
           status: 'failed',
-          error: error instanceof Error ? error.message : 'Unknown error'
-        }
+          error: error instanceof Error ? error.message : 'Unknown error',
+          judging: false,
+        },
       }));
+      if (elapsed < MIN_JUDGING_MS) setTimeout(applyError, MIN_JUDGING_MS - elapsed);
+      else applyError();
+    } finally {
+      const resolve = runResolversRef.current[scenario.id];
+      if (resolve) resolve();
+      delete runResolversRef.current[scenario.id];
     }
+  }
+
+  function handleStreamError(scenario: TestScenario, message: string) {
+    setResults(prev => ({
+      ...prev,
+      [scenario.id]: { scenarioId: scenario.id, status: 'failed', error: message },
+    }));
+    const resolve = runResolversRef.current[scenario.id];
+    if (resolve) resolve();
+    delete runResolversRef.current[scenario.id];
   }
 
   async function runAllTests() {
     setRunningAll(true);
     const filtered = filterCategory === 'all' 
-      ? testScenarios 
-      : testScenarios.filter(s => s.category === filterCategory);
+      ? scenarios 
+      : scenarios.filter(s => s.category === filterCategory);
     
     for (const scenario of filtered) {
-      await runTest(scenario);
+      await runStreamingTest(scenario);
       // Small delay between tests
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, 300));
     }
     setRunningAll(false);
   }
 
   function exportResults() {
-    const data = testScenarios.map(scenario => ({
+    const data = scenarios.map(scenario => ({
       ...scenario,
       ...results[scenario.id]
     }));
@@ -144,8 +289,8 @@ export default function TestPage() {
   }
 
   const filteredScenarios = filterCategory === 'all' 
-    ? testScenarios 
-    : testScenarios.filter(s => s.category === filterCategory);
+    ? scenarios 
+    : scenarios.filter(s => s.category === filterCategory);
 
   const stats = {
     total: filteredScenarios.length,
@@ -168,6 +313,70 @@ export default function TestPage() {
         </div>
         <div className="flex gap-2">
           <button
+            onClick={() => setConfigOpen((o) => !o)}
+            className="px-4 py-2 text-sm bg-neutral-200 dark:bg-neutral-800 rounded-lg hover:bg-neutral-300 dark:hover:bg-neutral-700"
+          >
+            {configOpen ? 'Hide Config' : 'Show Config'}
+          </button>
+          <button
+            onClick={() => {
+              try {
+                if (typeof window !== 'undefined') {
+                  const keysToRemove: string[] = [];
+                  for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i);
+                    if (k && k.startsWith(TESTS_PREFIX)) keysToRemove.push(k);
+                  }
+                  keysToRemove.forEach(k => localStorage.removeItem(k));
+                }
+              } catch (_) {}
+              // Reset in-memory state as well
+              setScenarios(testScenarios);
+              setResults(() => {
+                const initial: Record<string, TestResult> = {};
+                testScenarios.forEach(s => { initial[s.id] = { scenarioId: s.id, status: 'pending' }; });
+                return initial;
+              });
+            }}
+            className="px-4 py-2 text-sm bg-neutral-200 dark:bg-neutral-800 rounded-lg hover:bg-neutral-300 dark:hover:bg-neutral-700"
+          >
+            Clear Test LocalStorage
+          </button>
+          <button
+            onClick={() => {
+              // Reset scenarios to defaults
+              setScenarios(testScenarios);
+              try {
+                if (typeof window !== 'undefined') {
+                  localStorage.removeItem(SCENARIOS_KEY);
+                }
+              } catch (_) {}
+              // Reset results
+              setResults(() => {
+                const initial: Record<string, TestResult> = {};
+                testScenarios.forEach(s => { initial[s.id] = { scenarioId: s.id, status: 'pending' }; });
+                return initial;
+              });
+            }}
+            className="px-4 py-2 text-sm bg-neutral-200 dark:bg-neutral-800 rounded-lg hover:bg-neutral-300 dark:hover:bg-neutral-700"
+          >
+            Reset to Defaults
+          </button>
+          <button
+            onClick={() => {
+              setResults(prev => {
+                const next: Record<string, TestResult> = {};
+                Object.values(prev).forEach(r => {
+                  next[r.scenarioId] = { scenarioId: r.scenarioId, status: 'pending' };
+                });
+                return next;
+              });
+            }}
+            className="px-4 py-2 text-sm bg-neutral-200 dark:bg-neutral-800 rounded-lg hover:bg-neutral-300 dark:hover:bg-neutral-700"
+          >
+            Clear Results
+          </button>
+          <button
             onClick={exportResults}
             className="px-4 py-2 text-sm bg-neutral-200 dark:bg-neutral-800 rounded-lg hover:bg-neutral-300 dark:hover:bg-neutral-700"
           >
@@ -180,8 +389,58 @@ export default function TestPage() {
           >
             {runningAll ? 'Running...' : `Run ${filteredScenarios.length} Tests`}
           </button>
+          <button
+            onClick={() => {
+              const newScenario: TestScenario = {
+                id: `custom_${Date.now()}`,
+                name: 'New Scenario',
+                category: 'information_retrieval',
+                input: '',
+                expectedBehavior: '',
+                successCriteria: []
+              };
+              setEditingScenario(newScenario);
+            }}
+            className="px-4 py-2 text-sm bg-neutral-200 dark:bg-neutral-800 rounded-lg hover:bg-neutral-300 dark:hover:bg-neutral-700"
+          >
+            Add Scenario
+          </button>
         </div>
       </div>
+
+      {configOpen && (
+        <div className="p-4 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 space-y-3">
+          <div>
+            <div className="text-sm font-medium mb-1">System Prompt</div>
+            <textarea
+              className="w-full h-28 px-3 py-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono text-xs"
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+            />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <div className="text-sm font-medium mb-1">Search Tool Description</div>
+              <textarea
+                className="w-full h-20 px-3 py-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono text-xs"
+                value={toolSearchDesc}
+                onChange={(e) => setToolSearchDesc(e.target.value)}
+              />
+            </div>
+            <div>
+              <div className="text-sm font-medium mb-1">Read Tool Description</div>
+              <textarea
+                className="w-full h-20 px-3 py-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono text-xs"
+                value={toolReadDesc}
+                onChange={(e) => setToolReadDesc(e.target.value)}
+              />
+            </div>
+          </div>
+          <div className="text-xs text-neutral-500">
+            These values override the system message and tool descriptions for all runs in this session.
+          </div>
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-4 gap-4">
@@ -232,59 +491,125 @@ export default function TestPage() {
             </tr>
           </thead>
           <tbody>
-            {filteredScenarios.map(scenario => {
+            {filteredScenarios.map((scenario) => {
               const result = results[scenario.id];
               return (
-                <tr 
-                  key={scenario.id}
-                  className="border-b border-neutral-100 dark:border-neutral-900 hover:bg-neutral-50 dark:hover:bg-neutral-900/50"
-                >
-                  <td className="p-2">
-                    <span className={`inline-flex w-20 justify-center px-2 py-1 text-xs font-medium rounded-full ${
-                      result?.status === 'passed' ? 'bg-green-100 text-green-800' :
-                      result?.status === 'failed' ? 'bg-red-100 text-red-800' :
-                      result?.status === 'running' ? 'bg-blue-100 text-blue-800' :
-                      'bg-gray-100 text-gray-800'
-                    }`}>
-                      {result?.status || 'pending'}
-                    </span>
-                  </td>
-                  <td className="p-2 text-sm">{scenario.name}</td>
-                  <td className="p-2">
-                    <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${categoryColors[scenario.category]}`}>
-                      {categoryNames[scenario.category]}
-                    </span>
-                  </td>
-                  <td className="p-2 text-sm">
-                    {result?.score !== undefined ? `${result.score}/100` : '-'}
-                  </td>
-                  <td className="p-2 text-sm">
-                    {result?.executionTime ? `${(result.executionTime / 1000).toFixed(1)}s` : '-'}
-                  </td>
-                  <td className="p-2">
-                    <div className="flex gap-1">
-                      <button
-                        onClick={() => runTest(scenario)}
-                        disabled={result?.status === 'running' || runningAll}
-                        className="px-2 py-1 text-xs bg-black text-white dark:bg-white dark:text-black rounded disabled:opacity-50"
+                <Fragment key={scenario.id}>
+                  <tr
+                    key={`${scenario.id}-row`}
+                    className="border-b border-neutral-100 dark:border-neutral-900 hover:bg-neutral-50 dark:hover:bg-neutral-900/50"
+                  >
+                    <td className="p-2">
+                      <span
+                        className={`inline-flex w-20 justify-center px-2 py-1 text-xs font-medium rounded-full ${
+                          result?.status === 'passed'
+                            ? 'bg-green-100 text-green-800'
+                            : result?.status === 'failed'
+                            ? 'bg-red-100 text-red-800'
+                            : result?.status === 'running'
+                            ? 'bg-blue-100 text-blue-800'
+                            : 'bg-gray-100 text-gray-800'
+                        }`}
                       >
-                        Run
-                      </button>
-                      <button
-                        onClick={() => setSelectedScenario(scenario)}
-                        className="px-2 py-1 text-xs bg-neutral-200 dark:bg-neutral-800 rounded"
-                      >
-                        View
-                      </button>
-                      <button
-                        onClick={() => setEditingScenario(scenario)}
-                        className="px-2 py-1 text-xs bg-neutral-200 dark:bg-neutral-800 rounded"
-                      >
-                        Edit
-                      </button>
-                    </div>
-                  </td>
-                </tr>
+                        {result?.status || 'pending'}
+                      </span>
+                    </td>
+                    <td className="p-2 text-sm">{scenario.name}</td>
+                    <td className="p-2">
+                      <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${categoryColors[scenario.category]}`}>
+                        {categoryNames[scenario.category]}
+                      </span>
+                    </td>
+                    <td className="p-2 text-sm">{result?.score !== undefined ? `${result.score}/100` : '-'}</td>
+                    <td className="p-2 text-sm">
+                      {result?.executionTime ? `${(result.executionTime / 1000).toFixed(1)}s` : '-'}
+                    </td>
+                    <td className="p-2">
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => runStreamingTest(scenario)}
+                          disabled={result?.status === 'running' || runningAll}
+                          className="px-2 py-1 text-xs bg-black text-white dark:bg-white dark:text-black rounded disabled:opacity-50"
+                        >
+                          Run
+                        </button>
+                        <button
+                          onClick={() => toggleRow(scenario.id)}
+                          className="px-2 py-1 text-xs bg-neutral-200 dark:bg-neutral-800 rounded"
+                        >
+                          {expandedRows[scenario.id] ? 'Hide' : 'View'}
+                        </button>
+                        <button
+                          onClick={() => setEditingScenario(scenario)}
+                          className="px-2 py-1 text-xs bg-neutral-200 dark:bg-neutral-800 rounded"
+                        >
+                          Edit
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                  {expandedRows[scenario.id] && (
+                    <tr key={`${scenario.id}-details`} className="border-b border-neutral-100 dark:border-neutral-900">
+                      <td colSpan={6} className="p-3 bg-neutral-50/60 dark:bg-neutral-900/40">
+                        <div className="space-y-3">
+                          <TestRunRow
+                            scenario={scenario}
+                            runKey={runKeys[scenario.id]}
+                            initiallyExpanded
+                            onDone={(payload) => handleStreamDone(scenario, payload)}
+                            onError={(msg) => handleStreamError(scenario, msg)}
+                            systemPrompt={systemPrompt}
+                            toolDescriptions={{ search: toolSearchDesc, read: toolReadDesc }}
+                          />
+
+                          {results[scenario.id]?.feedback !== undefined || results[scenario.id]?.judging ? (
+                            <div className="p-3 rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
+                              <div className="flex items-center justify-between mb-2">
+                                <div className="text-sm font-medium">Judge Result</div>
+                                <div className="flex items-center gap-2">
+                                  {results[scenario.id]?.judging && (
+                                    <span className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300">
+                                      <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24" fill="none">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                      </svg>
+                                      Judging...
+                                    </span>
+                                  )}
+                                  {typeof results[scenario.id]?.score === 'number' && !results[scenario.id]?.judging && (
+                                    <span className="text-xs px-2 py-1 rounded bg-neutral-100 dark:bg-neutral-800">
+                                      Score: {results[scenario.id]!.score}/100
+                                    </span>
+                                  )}
+                                  <span className={`text-xs px-2 py-1 rounded-full ${
+                                    results[scenario.id]?.status === 'passed'
+                                      ? 'bg-green-100 text-green-800'
+                                      : results[scenario.id]?.status === 'failed'
+                                      ? 'bg-red-100 text-red-800'
+                                      : 'bg-gray-100 text-gray-800'
+                                  }`}>
+                                    {results[scenario.id]?.judging ? 'judging' : (results[scenario.id]?.status || 'pending')}
+                                  </span>
+                                </div>
+                              </div>
+                              {!results[scenario.id]?.judging && (
+                                <div className="text-sm whitespace-pre-wrap">
+                                  {results[scenario.id]?.feedback || 'No feedback provided'}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            expandedRows[scenario.id] && results[scenario.id]?.status === 'running' ? (
+                              <div className="p-3 rounded-lg border border-dashed border-neutral-300 dark:border-neutral-700 bg-white/60 dark:bg-neutral-900/40 text-xs text-neutral-500">
+                                Waiting for model response to finish before judging...
+                              </div>
+                            ) : null
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               );
             })}
           </tbody>
@@ -342,6 +667,134 @@ export default function TestPage() {
                   </div>
                 </div>
               )}
+
+              <div className="mt-4">
+                <div className="text-sm font-medium text-neutral-500 mb-2">Interactive Chat (uses test tools)</div>
+                <Chat
+                  endpoint="/api/test/stream"
+                  storageKey={`ca-agent-demo:test:chat:${selectedScenario.id}`}
+                  seedMessages={(selectedScenario.previousMessages || []).map(m => ({ role: m.role, content: m.content }))}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Modal */}
+      {editingScenario && editForm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white dark:bg-neutral-900 rounded-lg max-w-4xl w-full max-h-[85vh] overflow-y-auto p-6">
+            <div className="flex justify-between items-start mb-4">
+              <h3 className="text-lg font-semibold">{editingScenario ? 'Edit Scenario' : 'Add Scenario'}</h3>
+              <button
+                onClick={handleCancelEdit}
+                className="text-neutral-500 hover:text-neutral-700"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="block text-sm text-neutral-500">ID</label>
+                <input
+                  className="w-full px-3 py-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+                  value={editForm.id}
+                  onChange={(e) => setEditForm({ ...editForm, id: e.target.value })}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="block text-sm text-neutral-500">Name</label>
+                <input
+                  className="w-full px-3 py-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+                  value={editForm.name}
+                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="block text-sm text-neutral-500">Category</label>
+                <select
+                  className="w-full px-3 py-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+                  value={editForm.category}
+                  onChange={(e) => setEditForm({ ...editForm, category: e.target.value as TestCategory })}
+                >
+                  {Object.keys(categoryNames).map((key) => (
+                    <option key={key} value={key}>{categoryNames[key as TestCategory]}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="block text-sm text-neutral-500">Multi-turn</label>
+                <input
+                  type="checkbox"
+                  checked={editForm.isMultiTurn}
+                  onChange={(e) => setEditForm({ ...editForm, isMultiTurn: e.target.checked })}
+                />
+              </div>
+              <div className="md:col-span-2 space-y-2">
+                <label className="block text-sm text-neutral-500">Input</label>
+                <textarea
+                  className="w-full h-20 px-3 py-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+                  value={editForm.input}
+                  onChange={(e) => setEditForm({ ...editForm, input: e.target.value })}
+                />
+              </div>
+              <div className="md:col-span-2 space-y-2">
+                <label className="block text-sm text-neutral-500">Expected Behavior</label>
+                <textarea
+                  className="w-full h-20 px-3 py-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+                  value={editForm.expectedBehavior}
+                  onChange={(e) => setEditForm({ ...editForm, expectedBehavior: e.target.value })}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="block text-sm text-neutral-500">Success Criteria (one per line)</label>
+                <textarea
+                  className="w-full h-32 px-3 py-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+                  value={editForm.successCriteria}
+                  onChange={(e) => setEditForm({ ...editForm, successCriteria: e.target.value })}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="block text-sm text-neutral-500">Failure Criteria (one per line)</label>
+                <textarea
+                  className="w-full h-32 px-3 py-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900"
+                  value={editForm.failureCriteria}
+                  onChange={(e) => setEditForm({ ...editForm, failureCriteria: e.target.value })}
+                />
+              </div>
+              <div className="md:col-span-2 space-y-2">
+                <label className="block text-sm text-neutral-500">Previous Messages (JSON array of {`{ role, content }`})</label>
+                <textarea
+                  className="w-full h-40 px-3 py-2 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 font-mono text-xs"
+                  value={editForm.previousMessagesText}
+                  onChange={(e) => setEditForm({ ...editForm, previousMessagesText: e.target.value })}
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-between items-center mt-6">
+              <button
+                onClick={() => handleDeleteScenario(editForm.id)}
+                className="px-4 py-2 text-sm bg-red-100 text-red-800 rounded hover:bg-red-200"
+              >
+                Delete
+              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleCancelEdit}
+                  className="px-4 py-2 text-sm bg-neutral-200 dark:bg-neutral-800 rounded-lg hover:bg-neutral-300 dark:hover:bg-neutral-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveEdit}
+                  className="px-4 py-2 text-sm bg-black text-white dark:bg-white dark:text-black rounded-lg"
+                >
+                  Save
+                </button>
+              </div>
             </div>
           </div>
         </div>

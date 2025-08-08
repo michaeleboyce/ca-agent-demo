@@ -118,7 +118,18 @@ export default function Chat() {
                   });
                   break;
                   
-                case 'message':
+                case 'message_chunk':
+                  setMessages(prev => {
+                    const newMessages = [...prev];
+                    const msg = newMessages[msgIndex];
+                    if (msg) {
+                      msg.content = update.content;
+                    }
+                    return newMessages;
+                  });
+                  break;
+                  
+                case 'message_complete':
                   setMessages(prev => {
                     const newMessages = [...prev];
                     const msg = newMessages[msgIndex];

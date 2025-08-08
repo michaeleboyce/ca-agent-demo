@@ -13,7 +13,11 @@ export default function RootLayout({ children }: { children: ReactNode }) {
         <div className="mx-auto max-w-5xl p-4">
           <header className="mb-4 flex items-center justify-between">
             <h1 className="text-2xl font-semibold">USDR Chat over Docs</h1>
-            <a className="text-sm underline" href="https://github.com/" target="_blank">Source</a>
+            <div className="flex gap-4 items-center">
+              <a className="text-sm underline" href="/">Chat</a>
+              <a className="text-sm underline" href="/test">Test Suite</a>
+              <a className="text-sm underline" href="https://github.com/michaeleboyce" target="_blank">Source</a>
+            </div>
           </header>
           {children}
         </div>

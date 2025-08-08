@@ -95,9 +95,24 @@ HOW TO USE YOUR TOOLS:
           conversationMessages.push(message);
 
           if (!message.tool_calls || message.tool_calls.length === 0) {
+            // Stream the message content in chunks
+            const content = message.content || '';
+            const words = content.split(' ');
+            let accumulated = '';
+            
+            for (let i = 0; i < words.length; i++) {
+              accumulated += (i > 0 ? ' ' : '') + words[i];
+              sendEvent({ 
+                type: 'message_chunk', 
+                content: accumulated
+              });
+              // Small delay for streaming effect
+              await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            
             sendEvent({ 
-              type: 'message', 
-              content: message.content || '' 
+              type: 'message_complete', 
+              content 
             });
             
             sendEvent({
